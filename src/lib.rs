@@ -35,11 +35,16 @@
 #![no_std]
 
 use class_codes::*;
+// use usb_device::descriptor::descriptor_type::ENDPOINT;
 use core::convert::From;
 use usb_device::control::{Recipient, Request, RequestType};
 use usb_device::device::DEFAULT_ALTERNATE_SETTING;
 use usb_device::endpoint::{Endpoint, EndpointDirection, In, Out};
+#[cfg(feature = "async-synchronization")]
+use usb_device::endpoint::SyncType;
 use usb_device::{class_prelude::*, UsbDirection};
+
+use defmt_brtt as _; // global logger
 
 mod terminal_type;
 pub use terminal_type::TerminalType;
@@ -169,6 +174,12 @@ struct AudioStream<'a, B: UsbBus, D: EndpointDirection> {
     alt_setting: u8,
 }
 
+#[allow(dead_code)]
+struct Interrupt<'a, B: UsbBus> {
+    interface: InterfaceNumber,
+    endpoint: Endpoint<'a, B, In>
+} 
+
 macro_rules! append {
     ($iter:ident, $value:expr) => {
         *($iter.next().ok_or(UsbError::BufferOverflow)?.1) = $value;
@@ -181,6 +192,15 @@ macro_rules! append_u24le {
         append!($iter, ($value >> 8) as u8);
         append!($iter, ($value >> 16) as u8);
     };
+}
+
+impl<'a, B: UsbBus> Interrupt<'a, B> {
+    fn write_interrupt_descriptors(
+            &self,
+            writer: &mut DescriptorWriter
+        ) -> usb_device::Result<()> {
+            writer.endpoint(&self.endpoint)
+        }
 }
 
 impl<'a, B: UsbBus, D: EndpointDirection> AudioStream<'a, B, D> {
@@ -232,9 +252,14 @@ impl<'a, B: UsbBus, D: EndpointDirection> AudioStream<'a, B, D> {
                 0x00,                          // iTerminal
             ],
         )
-    }
+    } 
 
-    fn write_as_and_ep_descriptors(&self, writer: &mut DescriptorWriter) -> usb_device::Result<()> {
+    fn write_as_and_ep_descriptors(
+        &self, 
+        writer: &mut DescriptorWriter, 
+        #[cfg(feature = "async-synchronization")]
+        interrupt_address: u8
+    ) -> usb_device::Result<()> {
         let is_input = self.endpoint.address().direction() == UsbDirection::In;
         let id_offset = if is_input { 0 } else { 4 };
         // Standard AS Interface Descriptor (Alt. Set. 0)
@@ -300,7 +325,16 @@ impl<'a, B: UsbBus, D: EndpointDirection> AudioStream<'a, B, D> {
         writer.write(CS_INTERFACE, &format_desc[..length])?;
 
         // Standard Endpoint Descriptor
+        #[cfg(not(feature = "async-synchronization"))]
         writer.endpoint(&self.endpoint)?;
+        
+        // Standard Endpoint Descriptor with refresh rate and sync
+        // endpoint as additional data
+        #[cfg(feature = "async-synchronization")]
+        writer.endpoint_with_additional_data(&self.endpoint, [
+            0x01,   // bRefresh
+            interrupt_address // bSynchAddress
+        ])?;
 
         // Class-specific Isoc. Audio Data Endpoint Descriptor
         writer.write(
@@ -313,6 +347,7 @@ impl<'a, B: UsbBus, D: EndpointDirection> AudioStream<'a, B, D> {
                 0x00, 0x00, // wLockDelay
             ],
         )
+        
     }
 }
 
@@ -351,18 +386,51 @@ impl<'a> AudioClassBuilder<'a> {
         }
     }
 
+    // Create an interrupt endpoint
+    #[cfg(feature = "async-synchronization")]
+    fn setup_interrupt_endpoint<B: UsbBus>(alloc: &'a UsbBusAllocator<B>) -> Result<Interrupt<B>>{
+        
+        let interface = alloc.interface();
+
+        let endpoint = alloc.alloc(
+            Some(3.into()), 
+            EndpointType::Interrupt, 
+            None, 
+            2,  // wMaxPackageSize 
+            10   // bInterval
+        )?;
+
+        return Ok(Interrupt {
+            interface,
+            endpoint
+        })
+    } 
+
     /// Create the `AudioClass` structure
     pub fn build<B: UsbBus>(self, alloc: &'a UsbBusAllocator<B>) -> Result<AudioClass<'a, B>> {
         let control_iface = alloc.interface();
+
+        #[cfg(feature = "async-synchronization")]
+        let interrupt = Self::setup_interrupt_endpoint(alloc)?;
+        
         let mut ac = AudioClass {
             control_iface,
             input: None,
             output: None,
+            #[cfg(feature = "async-synchronization")]
+            interrupt: interrupt
         };
         if let Some(stream_config) = self.input {
             let interface = alloc.interface();
             let endpoint =
-                alloc.alloc(None, EndpointType::Isochronous, stream_config.ep_size, 1)?;
+                alloc.alloc(
+                    None, 
+                    EndpointType::Isochronous, 
+                    #[cfg(feature = "async-synchronization")]
+                    Some(SyncType::Asynchronous),
+                    stream_config.ep_size, 
+                    1
+                )?;
             let alt_setting = DEFAULT_ALTERNATE_SETTING;
             ac.input = Some(AudioStream {
                 stream_config,
@@ -375,7 +443,15 @@ impl<'a> AudioClassBuilder<'a> {
         if let Some(stream_config) = self.output {
             let interface = alloc.interface();
             let endpoint =
-                alloc.alloc(None, EndpointType::Isochronous, stream_config.ep_size, 1)?;
+                alloc.alloc(
+                    None, 
+                    EndpointType::Isochronous,
+                    #[cfg(feature = "async-synchronization")]
+                    Some(SyncType::Asynchronous), 
+                    stream_config.ep_size, 
+                    1
+                )?;
+
             let alt_setting = DEFAULT_ALTERNATE_SETTING;
             ac.output = Some(AudioStream {
                 stream_config,
@@ -398,6 +474,8 @@ pub struct AudioClass<'a, B: UsbBus> {
     control_iface: InterfaceNumber,
     input: Option<AudioStream<'a, B, In>>,
     output: Option<AudioStream<'a, B, Out>>,
+    #[cfg(feature = "async-synchronization")]
+    interrupt: Interrupt<'a, B>
 }
 
 impl<B: UsbBus> AudioClass<'_, B> {
@@ -419,6 +497,12 @@ impl<B: UsbBus> AudioClass<'_, B> {
         } else {
             Err(Error::StreamNotInitialized)
         }
+    }
+
+    /// Write the length of the current buffer for synchronization
+    #[cfg(feature = "async-synchronization")]
+    pub fn write_synch_interrupt(&self, data: &[u8]) -> Result<usize> {
+        self.interrupt.endpoint.write(data).map_err(Error::UsbError)
     }
 
     /// Get current Alternate Setting of the input stream. Returns an error if
@@ -484,13 +568,30 @@ impl<B: UsbBus> UsbClass<B> for AudioClass<'_, B> {
             a.write_ac_descriptors(writer)?;
         }
 
+        // Take the address of the interrupt endpoint without the directional bit
+        #[cfg(feature = "async-synchronization")]
+        let interrupt_address: u8 = u8::from(self.interrupt.endpoint.address());
+        // let interrupt_address: u8 = u8::from(self.interrupt.endpoint.address()) & 0x7f;
+        
         // write Audio Streaming (AS) and endpoint (EP) descriptors
         if let Some(ref a) = self.input {
-            a.write_as_and_ep_descriptors(writer)?;
+            a.write_as_and_ep_descriptors(
+                writer, 
+                #[cfg(feature = "async-synchronization")]
+                interrupt_address
+            )?;
         }
         if let Some(ref a) = self.output {
-            a.write_as_and_ep_descriptors(writer)?;
+            a.write_as_and_ep_descriptors(
+                writer, 
+                #[cfg(feature = "async-synchronization")]
+                interrupt_address
+            )?;
         }
+
+        #[cfg(feature = "async-synchronization")]
+        self.interrupt.write_interrupt_descriptors(writer)?;
+
         Ok(())
     }
 

@@ -11,4 +11,14 @@ license = "MIT OR Apache-2.0"
 include = ["README.md", "/src", "LICENSE"]
 
 [dependencies]
-usb-device = "0.2.8"
+defmt = { version = "0.3", features = ["encoding-rzcobs"] }
+defmt-brtt = { version = "0.1", default-features = false, features = ["rtt"] }
+
+# usb-device = { path = "../usb-device", features = ["control-buffer-256"]}
+usb-device = { version = "0.2.8" }
+
+[patch.crates-io]
+usb-device = { path = "../usb-device"}
+
+[features]
+async-synchronization = ["usb-device/synchronization-type"]
