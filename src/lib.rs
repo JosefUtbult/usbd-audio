@@ -195,6 +195,7 @@ macro_rules! append_u24le {
 }
 
 impl<'a, B: UsbBus> Interrupt<'a, B> {
+    #[allow(dead_code)]
     fn write_interrupt_descriptors(
             &self,
             writer: &mut DescriptorWriter
@@ -331,10 +332,15 @@ impl<'a, B: UsbBus, D: EndpointDirection> AudioStream<'a, B, D> {
         // Standard Endpoint Descriptor with refresh rate and sync
         // endpoint as additional data
         #[cfg(feature = "async-synchronization")]
-        writer.endpoint_with_additional_data(&self.endpoint, [
-            0x01,   // bRefresh
-            interrupt_address // bSynchAddress
-        ])?;
+        if !is_input {
+            writer.endpoint_with_additional_data(&self.endpoint, [
+                0x00,   // bRefresh
+                interrupt_address // bSynchAddress
+            ])?; 
+        }
+        else {
+            writer.endpoint(&self.endpoint)?;
+        }
 
         // Class-specific Isoc. Audio Data Endpoint Descriptor
         writer.write(
@@ -342,7 +348,10 @@ impl<'a, B: UsbBus, D: EndpointDirection> AudioStream<'a, B, D> {
             &[
                 // bDescriptorType: CS_ENDPOINT
                 0x01, // bDescriptorSubtype: GENERAL
-                0x00, // bmAttributes
+                // bmAttributes - MaxpacketsOnly: False (0), Reserved,
+                // Pitch control: False (0), Sampling frequency
+                // control: False (0)
+                0b0_00000_0_0, // bmAttributes
                 0x00, // bLockDelayUnits
                 0x00, 0x00, // wLockDelay
             ],
@@ -394,10 +403,11 @@ impl<'a> AudioClassBuilder<'a> {
 
         let endpoint = alloc.alloc(
             Some(3.into()), 
+            // None,
             EndpointType::Interrupt, 
             None, 
-            2,  // wMaxPackageSize 
-            10   // bInterval
+            294,  // wMaxPackageSize 
+            1   // bInterval
         )?;
 
         return Ok(Interrupt {
