@@ -18,7 +18,8 @@ defmt-brtt = { version = "0.1", default-features = false, features = ["rtt"] }
 usb-device = { version = "0.2.8" }
 
 [patch.crates-io]
-usb-device = { path = "../usb-device"}
+# usb-device = { path = "../usb-device"}
+usb-device = { git = "https://github.com/JosefUtbult/usb-device.git", branch = "sync-types" }
 
 [features]
 async-synchronization = ["usb-device/synchronization-type"]
