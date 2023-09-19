@@ -197,11 +197,14 @@ macro_rules! append_u24le {
 impl<'a, B: UsbBus> Interrupt<'a, B> {
     #[allow(dead_code)]
     fn write_interrupt_descriptors(
-            &self,
-            writer: &mut DescriptorWriter
-        ) -> usb_device::Result<()> {
-            writer.endpoint(&self.endpoint)
-        }
+        &self,
+        writer: &mut DescriptorWriter
+    ) -> usb_device::Result<()> {
+        writer.endpoint_with_additional_data(&self.endpoint, [
+            0x00,   // p, where p is related to the F_s speed
+            0x00 // bSynchAddress
+        ])
+    }
 }
 
 impl<'a, B: UsbBus, D: EndpointDirection> AudioStream<'a, B, D> {
@@ -404,7 +407,8 @@ impl<'a> AudioClassBuilder<'a> {
         let endpoint = alloc.alloc(
             Some(3.into()), 
             // None,
-            EndpointType::Interrupt, 
+            // EndpointType::Interrupt, 
+            EndpointType::Isochronous, 
             None, 
             294,  // wMaxPackageSize 
             1   // bInterval
